@@ -82,3 +82,4 @@ Ingest a batch of clickstream events.
 | event_type | enum | Yes | click, view, scroll, purchase |
 | timestamp | ISO 8601 | No (auto-generated) | Event occurrence time |
 | properties | object | No | Arbitrary event metadata |
+ 
