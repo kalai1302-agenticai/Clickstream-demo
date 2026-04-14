@@ -3,13 +3,15 @@ Clickstream Data Product — Event Ingestion API
 FastAPI application for receiving and publishing clickstream events.
 """
 
-import uuid
+import asyncio
 import logging
+import os
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -23,7 +25,11 @@ app = FastAPI(
     version="1.0.0",
 )
 
-VALID_API_KEYS = {"demo-api-key-123", "dell-demo-key-456"}
+VALID_API_KEYS = {
+    key.strip()
+    for key in os.getenv("VALID_API_KEYS", "demo-api-key-123,dell-demo-key-456").split(",")
+    if key.strip()
+}
 KAFKA_TOPIC = "clickstream.raw.events"
 
 
@@ -35,21 +41,27 @@ class EventType(str, Enum):
 
 
 class ClickEvent(BaseModel):
-    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    event_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     user_id: str = Field(..., min_length=1, max_length=128)
     session_id: str = Field(..., min_length=1, max_length=128)
     event_type: EventType
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     properties: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("timestamp")
+    @field_validator("timestamp", mode="before")
     @classmethod
-    def validate_timestamp(cls, value: str) -> str:
-        try:
-            datetime.fromisoformat(value)
-        except ValueError as exc:
-            raise ValueError("timestamp must be a valid ISO 8601 string") from exc
-        return value
+    def validate_timestamp(cls, value: Any) -> datetime:
+        if value is None:
+            return datetime.now(timezone.utc)
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError("timestamp must be a valid ISO 8601 string") from exc
+            return parsed.astimezone(timezone.utc)
+        raise ValueError("timestamp must be an ISO 8601 formatted string")
 
 
 class EventBatch(BaseModel):
@@ -62,29 +74,39 @@ class RejectedEvent(BaseModel):
 
 
 class IngestionResponse(BaseModel):
-    ingestion_id: str
+    ingestion_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     accepted_count: int
     rejected_events: list[RejectedEvent]
     topic: str
 
 
 def _authenticate(api_key: str | None) -> None:
-    if api_key not in VALID_API_KEYS:
+    if not api_key or api_key not in VALID_API_KEYS:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
-def _publish_to_kafka(event: ClickEvent) -> bool:
-    logger.info("Published event %s to topic %s", event.event_id, KAFKA_TOPIC)
+async def _publish_to_kafka(event: ClickEvent) -> bool:
+    logger.info(
+        "Simulated Kafka publish: topic=%s event_id=%s user_id=%s session_id=%s event_type=%s",
+        KAFKA_TOPIC,
+        event.event_id,
+        event.user_id,
+        event.session_id,
+        event.event_type,
+    )
+    await asyncio.sleep(0)
     return True
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    errors = exc.errors()
-    rejected_events = [
-        {"index": i, "reason": f"{e['msg']}: {' -> '.join(str(loc) for loc in e['loc'])}"}
-        for i, e in enumerate(errors)
-    ]
+    rejected_events = []
+    for error in exc.errors():
+        location = " -> ".join(str(part) for part in error.get("loc", []))
+        rejected_events.append(
+            {"index": -1, "reason": f"{error.get('msg')} (location: {location})"}
+        )
+
     return JSONResponse(
         status_code=422,
         content={
@@ -97,25 +119,33 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 @app.get("/health")
-def health_check() -> dict[str, str]:
-    return {"status": "healthy", "service": "clickstream-ingestion-api", "version": "1.0.0"}
+async def health_check() -> dict[str, str]:
+    return {
+        "status": "healthy",
+        "service": "clickstream-ingestion-api",
+        "version": "1.0.0",
+    }
 
 
 @app.post("/v1/events", response_model=IngestionResponse, status_code=202)
-def ingest_events(
+async def ingest_events(
     batch: EventBatch,
-    x_api_key: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
 ) -> IngestionResponse:
     _authenticate(x_api_key)
 
-    ingestion_id = str(uuid.uuid4())
+    ingestion_id = uuid.uuid4()
     accepted_count = 0
     rejected_events: list[RejectedEvent] = []
 
     for index, event in enumerate(batch.events):
         try:
-            if _publish_to_kafka(event):
+            if await _publish_to_kafka(event):
                 accepted_count += 1
+            else:
+                rejected_events.append(
+                    RejectedEvent(index=index, reason="failed to publish event")
+                )
         except Exception as exc:
             logger.error("Failed to publish event at index %d: %s", index, exc)
             rejected_events.append(RejectedEvent(index=index, reason=str(exc)))
