@@ -1,6 +1,8 @@
 """
-Clickstream Data Product — Event Ingestion API
-FastAPI application for receiving and publishing clickstream events.
+Clickstream Ingestion API — FastAPI service for real-time event ingestion.
+
+This module implements the POST /v1/events endpoint with API key authentication,
+batch processing, and simulated Kafka publishing.
 """
 
 import logging
@@ -8,140 +10,147 @@ import os
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, validator
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
-logger = logging.getLogger("clickstream.ingestion")
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-VALID_API_KEYS = set(os.getenv("VALID_API_KEYS", "demo-api-key-123,dell-demo-key-456").split(","))
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "clickstream.raw.events")
+# Valid API keys (in production, load from secure config)
+VALID_API_KEYS = {"demo-api-key-123", "dell-demo-key-456"}
 
-app = FastAPI(
-    title="Clickstream Ingestion API",
-    description="Real-time event ingestion for the Clickstream Data Product",
-    version="1.0.0",
-)
+# Kafka topic (simulated)
+KAFKA_TOPIC = "clickstream.raw.events"
 
 
 class EventType(str, Enum):
-    click = "click"
-    view = "view"
-    scroll = "scroll"
-    purchase = "purchase"
+    """Enumeration of supported event types."""
+    CLICK = "click"
+    VIEW = "view"
+    SCROLL = "scroll"
+    PURCHASE = "purchase"
 
 
 class ClickEvent(BaseModel):
-    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str = Field(..., min_length=1, max_length=128)
-    session_id: str = Field(..., min_length=1, max_length=128)
-    event_type: EventType
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    properties: dict[str, Any] = Field(default_factory=dict)
+    """Pydantic model for a single clickstream event."""
+    event_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique event identifier (auto-generated)")
+    user_id: str = Field(..., description="Authenticated user identifier")
+    session_id: str = Field(..., description="Browser/app session identifier")
+    event_type: EventType = Field(..., description="Type of event")
+    timestamp: Optional[str] = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat(), description="Event occurrence time (ISO 8601, auto-generated)")
+    properties: Optional[Dict[str, str]] = Field(default_factory=dict, description="Arbitrary event metadata")
 
-    @field_validator("timestamp")
-    @classmethod
-    def validate_timestamp(cls, value: str) -> str:
-        try:
-            datetime.fromisoformat(value)
-        except ValueError as exc:
-            raise ValueError("Invalid ISO 8601 timestamp") from exc
-        return value
+    @validator('event_id', pre=True, always=True)
+    def generate_event_id(cls, v):
+        return v or str(uuid.uuid4())
 
-
-class EventBatch(BaseModel):
-    events: list[dict[str, Any]] = Field(..., min_length=1, max_length=1000)
+    @validator('timestamp', pre=True, always=True)
+    def generate_timestamp(cls, v):
+        return v or datetime.now(timezone.utc).isoformat()
 
 
-class RejectedEvent(BaseModel):
-    index: int
-    reason: str
+class EventBatchRequest(BaseModel):
+    """Request model for batch event ingestion."""
+    events: List[ClickEvent] = Field(..., min_items=1, max_items=1000, description="List of events to ingest (1-1000)")
 
 
 class IngestionResponse(BaseModel):
-    ingestion_id: str
-    accepted_count: int
-    rejected_events: list[RejectedEvent]
-    topic: str
+    """Response model for successful ingestion."""
+    ingestion_id: str = Field(..., description="Unique ingestion batch identifier")
+    accepted_count: int = Field(..., description="Number of events accepted")
+    rejected_events: List[Dict[str, str]] = Field(default_factory=list, description="List of rejected events with error details")
+    topic: str = Field(..., description="Kafka topic where events were published")
 
 
-async def _authenticate(api_key: str | None) -> None:
-    if api_key not in VALID_API_KEYS:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+class HealthResponse(BaseModel):
+    """Response model for health check."""
+    status: str = Field(..., description="Service health status")
+    service: str = Field(..., description="Service name")
+    version: str = Field(..., description="Service version")
 
 
-async def _publish_to_kafka(event: ClickEvent) -> bool:
-    logger.info(
-        "Simulated Kafka publish: topic=%s event_id=%s user_id=%s session_id=%s event_type=%s",
-        KAFKA_TOPIC,
-        event.event_id,
-        event.user_id,
-        event.session_id,
-        event.event_type,
-    )
-    return True
+def authenticate_api_key(request: Request) -> None:
+    """Dependency to authenticate requests using x-api-key header."""
+    api_key = request.headers.get("x-api-key")
+    if not api_key or api_key not in VALID_API_KEYS:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key"
+        )
 
 
-@app.get("/health")
-async def health_check() -> dict[str, str]:
-    return {
-        "status": "healthy",
-        "service": "clickstream-ingestion-api",
-        "version": "1.0.0",
-    }
+app = FastAPI(
+    title="Clickstream Ingestion API",
+    description="Real-time event ingestion service for clickstream analytics",
+    version="1.0.0",
+    dependencies=[Depends(authenticate_api_key)]
+)
 
 
-@app.post("/v1/events", response_model=IngestionResponse, status_code=202)
-async def ingest_events(
-    batch: EventBatch,
-    x_api_key: str | None = Header(default=None),
-) -> IngestionResponse:
-    await _authenticate(x_api_key)
-
+@app.post(
+    "/v1/events",
+    response_model=IngestionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ingest batch of clickstream events",
+    description="Accepts a batch of 1-1000 clickstream events, validates them, and publishes to Kafka topic."
+)
+async def ingest_events(request: EventBatchRequest) -> IngestionResponse:
+    """Ingest a batch of clickstream events."""
     ingestion_id = str(uuid.uuid4())
     accepted_count = 0
-    rejected_events: list[RejectedEvent] = []
+    rejected_events = []
 
-    for index, event_dict in enumerate(batch.events):
-        try:
-            event = ClickEvent(**event_dict)
-            published = await _publish_to_kafka(event)
-            if published:
-                accepted_count += 1
-        except ValidationError as exc:
-            rejected_events.append(
-                RejectedEvent(index=index, reason="; ".join(err["msg"] for err in exc.errors()))
-            )
-        except Exception as exc:
-            logger.error("Failed to publish event at index %d: %s", index, exc)
-            rejected_events.append(RejectedEvent(index=index, reason=str(exc)))
-
-    if rejected_events:
+    # Validate batch size (though Pydantic handles min/max, we can customize)
+    if len(request.events) > 1000:
         raise HTTPException(
-            status_code=422,
-            detail={
-                "ingestion_id": ingestion_id,
-                "accepted_count": accepted_count,
-                "rejected_events": [rej.model_dump() for rej in rejected_events],
-                "topic": KAFKA_TOPIC,
-            },
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Batch size exceeds maximum of 1000 events"
         )
+
+    # Process each event (in production, validate more thoroughly)
+    for event in request.events:
+        try:
+            # Simulate validation (Pydantic already validates structure)
+            # In a real scenario, add business logic validation here
+            accepted_count += 1
+        except Exception as e:
+            rejected_events.append({
+                "event_id": event.event_id,
+                "error": str(e)
+            })
+
+    # Simulate Kafka publish by logging
+    logger.info(f"Publishing {accepted_count} events to topic '{KAFKA_TOPIC}' with ingestion_id '{ingestion_id}'")
+    for event in request.events:
+        logger.info(f"Event: {event.json()}")
 
     return IngestionResponse(
         ingestion_id=ingestion_id,
         accepted_count=accepted_count,
         rejected_events=rejected_events,
-        topic=KAFKA_TOPIC,
+        topic=KAFKA_TOPIC
     )
 
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("Unhandled exception while processing request")
-    return JSONResponse(status_code=500, content={"detail": "Server error"})
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+    summary="Health check endpoint",
+    description="Returns the health status of the service."
+)
+async def health_check() -> HealthResponse:
+    """Health check endpoint."""
+    return HealthResponse(
+        status="healthy",
+        service="clickstream-ingestion-api",
+        version="1.0.0"
+    )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
