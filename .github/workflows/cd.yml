@@ -26,7 +26,7 @@ jobs:
     steps:
       - name: Deployment summary
         run: |
-          echo "======================================"
+          echo "========================================="
           echo "  CD PIPELINE - ${{ inputs.environment }}"
           echo "======================================"
           echo "  Image : clickstream-ingestion-api"

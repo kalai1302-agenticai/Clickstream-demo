@@ -89,12 +89,20 @@ class TestEventIngestion:
             headers=AUTH,
         )
         assert response.status_code == 422
+        data = response.json()
+        assert data["detail"]["accepted_count"] == 0
+        assert len(data["detail"]["rejected_events"]) == 1
+        assert "Input should be" in data["detail"]["rejected_events"][0]["reason"]
 
     def test_missing_user_id_rejected(self):
         event = make_event()
         del event["user_id"]
         response = client.post("/v1/events", json={"events": [event]}, headers=AUTH)
         assert response.status_code == 422
+        data = response.json()
+        assert data["detail"]["accepted_count"] == 0
+        assert len(data["detail"]["rejected_events"]) == 1
+        assert "Field required" in data["detail"]["rejected_events"][0]["reason"]
 
     def test_empty_batch_rejected(self):
         response = client.post("/v1/events", json={"events": []}, headers=AUTH)

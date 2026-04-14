@@ -122,6 +122,17 @@ async def ingest_events(
             logger.error("Failed to publish event at index %d: %s", index, exc)
             rejected_events.append(RejectedEvent(index=index, reason=str(exc)))
 
+    if rejected_events:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "ingestion_id": ingestion_id,
+                "accepted_count": accepted_count,
+                "rejected_events": [rej.model_dump() for rej in rejected_events],
+                "topic": KAFKA_TOPIC,
+            },
+        )
+
     return IngestionResponse(
         ingestion_id=ingestion_id,
         accepted_count=accepted_count,
