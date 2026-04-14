@@ -27,7 +27,7 @@ jobs:
       - name: Deployment summary
         run: |
           echo "======================================"
-          echo "  CD PIPELINE - ${{ inputs.environment | upcase }}"
+          echo "  CD PIPELINE - ${{ inputs.environment }}"
           echo "======================================"
           echo "  Image : clickstream-ingestion-api"
           echo "  Tag   : ${{ inputs.image_tag }}"
