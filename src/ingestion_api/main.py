@@ -41,7 +41,7 @@ class EventType(str, Enum):
 
 
 class ClickEvent(BaseModel):
-    event_id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str = Field(..., min_length=1, max_length=128)
     session_id: str = Field(..., min_length=1, max_length=128)
     event_type: EventType
