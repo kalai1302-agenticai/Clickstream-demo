@@ -16,6 +16,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from src.ingestion_api.config import KafkaConfig
+from src.ingestion_api.kafka_producer import KafkaProducerClient, KafkaProducerError
+from src.ingestion_api.models import KafkaHealthResponse
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,47 @@ VALID_API_KEYS = {
     if key.strip()
 }
 KAFKA_TOPIC = "clickstream.raw.events"
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    try:
+        kafka_config = KafkaConfig.load()
+    except ValueError as exc:
+        logger.warning(
+            "Kafka configuration not found; falling back to simulated publish: %s",
+            exc,
+        )
+        app.state.kafka_client = None
+        app.state.kafka_topic = KAFKA_TOPIC
+        app.state.kafka_cluster = "unknown"
+        return
+
+    app.state.kafka_client = KafkaProducerClient(
+        bootstrap_servers=kafka_config.bootstrap_servers,
+        api_key=kafka_config.api_key,
+        api_secret=kafka_config.api_secret,
+        topic=kafka_config.topic,
+    )
+    app.state.kafka_topic = kafka_config.topic
+    app.state.kafka_cluster = kafka_config.cluster
+
+    try:
+        if not app.state.kafka_client.validate_connection():
+            raise RuntimeError("Kafka connectivity validation failed")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Kafka startup connectivity validation failed; continuing in fallback mode: %s",
+            exc,
+        )
+        app.state.kafka_client = None
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    kafka_client = getattr(app.state, "kafka_client", None)
+    if kafka_client is not None:
+        kafka_client.close()
 
 
 class EventType(str, Enum):
@@ -86,16 +131,46 @@ def _authenticate(api_key: str | None) -> None:
 
 
 async def _publish_to_kafka(event: ClickEvent) -> bool:
-    logger.info(
-        "Simulated Kafka publish: topic=%s event_id=%s user_id=%s session_id=%s event_type=%s",
-        KAFKA_TOPIC,
-        event.event_id,
-        event.user_id,
-        event.session_id,
-        event.event_type,
+    kafka_client: KafkaProducerClient = getattr(app.state, "kafka_client", None)
+    if kafka_client is None:
+        logger.info(
+            "Kafka client not configured; simulating publish for event_id=%s",
+            event.event_id,
+        )
+        await asyncio.sleep(0)
+        return True
+
+    try:
+        metadata = await kafka_client.publish_event(event.model_dump())
+        logger.info(
+            "Published event to Kafka: topic=%s event_id=%s partition=%s offset=%s",
+            app.state.kafka_topic,
+            metadata.get("event_id"),
+            metadata.get("kafka_partition"),
+            metadata.get("kafka_offset"),
+        )
+        return True
+    except KafkaProducerError as exc:
+        logger.error("Kafka publish failed for event_id=%s: %s", event.event_id, exc)
+        return False
+
+
+@app.get("/health/kafka", response_model=KafkaHealthResponse)
+async def kafka_health() -> KafkaHealthResponse:
+    kafka_client: KafkaProducerClient = getattr(app.state, "kafka_client", None)
+    if kafka_client is None:
+        return KafkaHealthResponse(
+            kafka_connected=False,
+            kafka_topic=getattr(app.state, "kafka_topic", KAFKA_TOPIC),
+            kafka_cluster=getattr(app.state, "kafka_cluster", "unknown"),
+        )
+
+    connected = kafka_client.validate_connection()
+    return KafkaHealthResponse(
+        kafka_connected=connected,
+        kafka_topic=app.state.kafka_topic,
+        kafka_cluster=app.state.kafka_cluster,
     )
-    await asyncio.sleep(0)
-    return True
 
 
 @app.exception_handler(RequestValidationError)
@@ -154,5 +229,5 @@ async def ingest_events(
         ingestion_id=ingestion_id,
         accepted_count=accepted_count,
         rejected_events=rejected_events,
-        topic=KAFKA_TOPIC,
+        topic=getattr(app.state, "kafka_topic", KAFKA_TOPIC),
     )
