@@ -4,6 +4,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+load_dotenv()
+
 
 def _get_env(name: str, default: Optional[str] = None, required: bool = False) -> str:
     value = environ.get(name, default)
@@ -24,7 +26,6 @@ class Config:
 
     @classmethod
     def load(cls) -> "Config":
-        load_dotenv()
         kafka_bootstrap_servers = _get_env(
             "KAFKA_BOOTSTRAP_SERVERS",
             default="pkc-n3603.us-central1.gcp.confluent.cloud:9092",

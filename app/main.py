@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app.config import Config
 from app.kafka_producer import KafkaProducerClient, KafkaProducerError
@@ -19,14 +18,35 @@ logger = logging.getLogger(__name__)
 
 class JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        payload = {
+        payload: Dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
         }
         for key, value in record.__dict__.items():
-            if key in {"msg", "args", "levelname", "levelno", "pathname", "filename", "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName", "created", "msecs", "relativeCreated", "thread", "threadName", "processName", "process", "name"}:
+            if key in {
+                "msg",
+                "args",
+                "levelname",
+                "levelno",
+                "pathname",
+                "filename",
+                "module",
+                "exc_info",
+                "exc_text",
+                "stack_info",
+                "lineno",
+                "funcName",
+                "created",
+                "msecs",
+                "relativeCreated",
+                "thread",
+                "threadName",
+                "processName",
+                "process",
+                "name",
+            }:
                 continue
             if value is not None:
                 payload[key] = value
@@ -36,9 +56,9 @@ class JsonLogFormatter(logging.Formatter):
 def setup_logging() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonLogFormatter())
-    root = logging.getLogger()
-    root.handlers = [handler]
-    root.setLevel(logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.handlers = [handler]
+    root_logger.setLevel(logging.INFO)
 
 
 def get_correlation_id(request: Request) -> str:
@@ -84,6 +104,10 @@ def create_app() -> FastAPI:
             if not app.state.kafka_client.validate_connection():
                 raise RuntimeError("Kafka connectivity validation failed")
             app.state.start_time = datetime.now(timezone.utc)
+            logger.info(
+                "Application startup completed successfully",
+                extra={"kafka_topic": config.kafka_topic, "kafka_cluster": config.kafka_cluster},
+            )
         except Exception as exc:
             logger.error("Application startup failed", exc_info=exc)
             raise
@@ -97,28 +121,32 @@ def create_app() -> FastAPI:
     def get_kafka_client() -> KafkaProducerClient:
         kafka_client = getattr(app.state, "kafka_client", None)
         if kafka_client is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Kafka producer is not initialized")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Kafka producer is not initialized",
+            )
         return kafka_client
 
     @app.post("/api/v1/events", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
-    async def publish_event(event: ClickstreamEvent, kafka_client: KafkaProducerClient = Depends(get_kafka_client), request: Request = Depends()) -> EventResponse:
+    async def publish_event(event: ClickstreamEvent, kafka_client: KafkaProducerClient = Depends(get_kafka_client), request: Request = None) -> EventResponse:
         try:
             metadata = await kafka_client.publish_event(event.model_dump())
             return EventResponse(
                 event_id=event.event_id,
                 status="published",
                 kafka_offset=metadata["offset"],
-                kafka_partition=metadata["partition"],
             )
         except KafkaProducerError as exc:
+            correlation_id = getattr(request.state, "correlation_id", None) if request else None
             logger.error(
                 "Kafka publish failed",
                 exc_info=exc,
-                extra={"event_id": event.event_id, "correlation_id": request.state.correlation_id},
+                extra={"event_id": event.event_id, "correlation_id": correlation_id},
             )
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to publish event to Kafka") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to publish event to Kafka",
+            ) from exc
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -131,7 +159,10 @@ def create_app() -> FastAPI:
                 kafka_topic=app.state.config.kafka_topic,
                 kafka_cluster=app.state.config.kafka_cluster,
             )
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Kafka cluster is unreachable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Kafka cluster is unreachable",
+        )
 
     @app.get("/metrics")
     async def metrics() -> Dict[str, Any]:
@@ -141,9 +172,12 @@ def create_app() -> FastAPI:
     @app.post("/api/v1/events/test")
     async def publish_test_events(count: int = 1, kafka_client: KafkaProducerClient = Depends(get_kafka_client)) -> Dict[str, Any]:
         if count < 1 or count > 100:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="count must be between 1 and 100")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="count must be between 1 and 100",
+            )
 
-        published_event_ids = []
+        published_event_ids: list[str] = []
         for _ in range(count):
             sample_event = ClickstreamEvent(
                 user_id=f"user_{uuid.uuid4().hex[:8]}",
