@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -23,12 +24,6 @@ from src.ingestion_api.models import KafkaHealthResponse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Clickstream Ingestion API",
-    description="Real-time event ingestion for the Clickstream Data Product",
-    version="1.0.0",
-)
-
 VALID_API_KEYS = {
     key.strip()
     for key in os.getenv("VALID_API_KEYS", "demo-api-key-123,dell-demo-key-456").split(",")
@@ -37,8 +32,9 @@ VALID_API_KEYS = {
 KAFKA_TOPIC = "clickstream.raw.events"
 
 
-@app.on_event("startup")
-async def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     try:
         kafka_config = KafkaConfig.load()
     except ValueError as exc:
@@ -49,6 +45,7 @@ async def on_startup() -> None:
         app.state.kafka_client = None
         app.state.kafka_topic = KAFKA_TOPIC
         app.state.kafka_cluster = "unknown"
+        yield
         return
 
     app.state.kafka_client = KafkaProducerClient(
@@ -70,12 +67,20 @@ async def on_startup() -> None:
         )
         app.state.kafka_client = None
 
+    yield
 
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
+    # Shutdown
     kafka_client = getattr(app.state, "kafka_client", None)
     if kafka_client is not None:
         kafka_client.close()
+
+
+app = FastAPI(
+    title="Clickstream Ingestion API",
+    description="Real-time event ingestion for the Clickstream Data Product",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 
 class EventType(str, Enum):
