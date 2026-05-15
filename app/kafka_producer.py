@@ -41,15 +41,21 @@ class KafkaProducerClient:
         self.events_published_failed = 0
         self._metrics_lock = threading.Lock()
         self._start_time = monotonic()
-        logger.info("Kafka producer initialized successfully", extra={"bootstrap_servers": config.kafka_bootstrap_servers})
+        logger.info(
+            "Kafka producer initialized successfully",
+            extra={"bootstrap_servers": config.kafka_bootstrap_servers, "topic": config.kafka_topic},
+        )
 
     def validate_connection(self, timeout: float = 10.0) -> bool:
-        """Validate Kafka connectivity by listing topics."""
+        """Validate Kafka connectivity by listing topic metadata."""
         try:
             metadata = self._producer.list_topics(timeout=timeout)
             if metadata.topics is None:
                 raise KafkaProducerError("Kafka returned no topic metadata")
-            logger.info("Kafka connection validated successfully", extra={"topic_count": len(metadata.topics)})
+            logger.info(
+                "Kafka connection validated successfully",
+                extra={"topic_count": len(metadata.topics)},
+            )
             return True
         except (KafkaException, KafkaError) as exc:
             logger.error("Kafka connection failed", exc_info=exc)
@@ -59,7 +65,7 @@ class KafkaProducerClient:
             return False
 
     async def publish_event(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Publish an event to Kafka and return metadata."""
+        """Publish an event to Kafka and return offset metadata."""
         return await asyncio.get_running_loop().run_in_executor(None, self._publish_sync, event_data)
 
     def _publish_sync(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,7 +85,7 @@ class KafkaProducerClient:
                 logger.error(
                     "Failed to publish event to Kafka",
                     exc_info=err,
-                    extra={"topic": self._config.kafka_topic, "event_data": event_data},
+                    extra={"topic": self._config.kafka_topic, "event_id": event_data.get("event_id")},
                 )
                 with self._metrics_lock:
                     self.events_published_failed += 1
@@ -92,7 +98,12 @@ class KafkaProducerClient:
             partition = msg.partition()
             logger.info(
                 "Event published to Kafka",
-                extra={"event_id": event_data.get("event_id"), "offset": offset, "partition": partition},
+                extra={
+                    "event_id": event_data.get("event_id"),
+                    "topic": self._config.kafka_topic,
+                    "offset": offset,
+                    "partition": partition,
+                },
             )
             with self._metrics_lock:
                 self.events_published_success += 1
@@ -134,7 +145,7 @@ class KafkaProducerClient:
             }
 
     def close(self) -> None:
-        """Flush and close the Kafka producer gracefully."""
+        """Flush outstanding messages and close the Kafka producer."""
         try:
             self._producer.flush(10)
             logger.info("Kafka producer flushed and closed successfully")

@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Dict, Optional
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class EventType(str, Enum):
@@ -56,7 +56,6 @@ class EventResponse(BaseModel):
     event_id: str
     status: str
     kafka_offset: int
-    kafka_partition: int
 
 
 class HealthResponse(BaseModel):
